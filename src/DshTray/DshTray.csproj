@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>DshTray</AssemblyName>
+    <RootNamespace>DshTray</RootNamespace>
+    <Version>0.1.0</Version>
+    <Description>DeepSeek Harness system tray controller (restart / exit)</Description>
+    <PublishSingleFile>true</PublishSingleFile>
+    <SelfContained>false</SelfContained>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+  </PropertyGroup>
+
+  <!-- 托盘图标资源：内嵌 favicon.png，运行时转 Icon（与 dsh-launcher 相同做法） -->
+  <ItemGroup>
+    <EmbeddedResource Include="assets\favicon.png" />
+  </ItemGroup>
+
+</Project>
