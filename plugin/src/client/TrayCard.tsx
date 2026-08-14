@@ -103,48 +103,118 @@ export type TrayCardProps =
   & PropsLocale<'dsh-tray'>
   & InjectFace<TrayCardFace>
 
-/** Minimal inline-styled row for the card body. */
+/** Card shell: mirrors the standard plugin card (ui-plugin-config PluginCard). */
+const cardStyle: React.CSSProperties = {
+  listStyle: 'none',
+  border: '1px solid var(--dsw-alias-border-l2)',
+  borderRadius: '12px',
+  background: 'var(--dsw-alias-bg-layer-3)',
+  margin: '8px 0',
+  transition: 'border-color .16s, background .16s',
+}
+
+/** Open card reads as the one being worked on (matches PluginCard.cardOpen). */
+const cardOpenStyle: React.CSSProperties = {
+  ...cardStyle,
+  background: 'var(--dsw-alias-bg-layer-2)',
+  borderColor: 'var(--dsw-alias-label-dimmed)',
+}
+
+/** Card header button (matches PluginCard.header). */
+const headerStyle: React.CSSProperties = {
+  width: '100%',
+  appearance: 'none',
+  border: 0,
+  background: 'none',
+  font: 'inherit',
+  color: 'inherit',
+  textAlign: 'left',
+  cursor: 'pointer',
+  display: 'flex',
+  alignItems: 'center',
+  gap: '12px',
+  padding: '14px 16px',
+  borderRadius: '12px',
+}
+
+/** Name + description column (matches PluginCard.headText). */
+const headTextStyle: React.CSSProperties = {
+  flex: 1,
+  minWidth: 0,
+  display: 'flex',
+  flexDirection: 'column',
+  gap: '4px',
+}
+
+/** Plugin name (matches PluginCard.name). */
+const nameStyle: React.CSSProperties = {
+  fontSize: '15px',
+  fontWeight: 600,
+  lineHeight: 1.4,
+  color: 'var(--dsw-alias-label-primary)',
+}
+
+/** Description / hints (matches PluginCard.description). */
+const descStyle: React.CSSProperties = {
+  fontSize: '13px',
+  lineHeight: 1.5,
+  color: 'var(--dsw-alias-label-tertiary)',
+}
+
+/** Chevron (matches PluginCard.chevron). */
+const chevronStyle: React.CSSProperties = {
+  flex: 'none',
+  color: 'var(--dsw-alias-label-tertiary)',
+}
+
+/** Minimal row for the card body. */
 const rowStyle: React.CSSProperties = {
   display: 'flex',
   alignItems: 'center',
   gap: '8px',
   flexWrap: 'wrap',
-  margin: '6px 0',
+  margin: '8px 0',
 }
 
+/** Secondary button (matches PluginCard.discard). */
 const buttonStyle: React.CSSProperties = {
   padding: '5px 14px',
-  borderRadius: '6px',
-  border: '1px solid rgba(128, 128, 128, 0.45)',
-  background: 'rgba(128, 128, 128, 0.12)',
-  color: 'inherit',
+  borderRadius: '8px',
+  border: '1px solid var(--dsw-alias-border-l2)',
+  background: 'none',
+  color: 'var(--dsw-alias-label-secondary)',
   cursor: 'pointer',
   fontSize: '13px',
+  lineHeight: 1.5,
 }
 
+/** Danger-tinted action (restart / exit), themed via error tokens. */
 const dangerButtonStyle: React.CSSProperties = {
   ...buttonStyle,
-  borderColor: 'rgba(220, 90, 90, 0.6)',
-  background: 'rgba(220, 90, 90, 0.14)',
+  borderColor: 'var(--dsw-alias-state-error-primary)',
+  background: 'var(--dsw-alias-state-error-secondary)',
+  color: 'var(--dsw-alias-state-error-primary)',
 }
 
+/** Form field (themed input). */
 const fieldStyle: React.CSSProperties = {
   display: 'block',
   width: '100%',
   boxSizing: 'border-box',
-  padding: '6px 8px',
-  borderRadius: '6px',
-  border: '1px solid rgba(128, 128, 128, 0.45)',
-  background: 'rgba(0, 0, 0, 0.25)',
+  padding: '6px 10px',
+  borderRadius: '8px',
+  border: '1px solid var(--dsw-alias-border-l2)',
+  background: 'var(--dsw-alias-bg-layer-1)',
   color: 'inherit',
   fontSize: '13px',
   marginTop: '4px',
 }
 
-const hintStyle: React.CSSProperties = {
-  margin: '4px 0 0',
-  fontSize: '12px',
-  opacity: 0.7,
+/** Primary button (matches PluginCard.save). */
+const primaryButtonStyle: React.CSSProperties = {
+  ...buttonStyle,
+  background: 'var(--dsw-alias-label-primary)',
+  color: 'var(--dsw-alias-bg-layer-3)',
 }
 
 /**
@@ -227,23 +297,23 @@ export function TrayCard(props: TrayCardProps) {
   const noExe = status !== null && status.trayPath === null
 
   return (
-    <li style={{ listStyle: 'none', border: '1px solid rgba(128,128,128,0.28)', borderRadius: '10px', padding: '0 14px', margin: '8px 0' }}>
+    <li style={open ? cardOpenStyle : cardStyle}>
       <button
         type="button"
-        style={{ ...buttonStyle, border: 'none', background: 'none', width: '100%', display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '12px 2px' }}
+        style={headerStyle}
         aria-expanded={open}
         onClick={() => { setOpen(!open) }}
       >
-        <span>
-          <span style={{ fontWeight: 600, display: 'block' }}>{t('settings.title')}</span>
-          <span style={hintStyle}>{t('settings.description')}</span>
+        <span style={headTextStyle}>
+          <span style={nameStyle}>{t('settings.title')}</span>
+          <span style={descStyle}>{t('settings.description')}</span>
         </span>
-        <span>{open ? '▾' : '▸'}</span>
+        <span style={chevronStyle}>{open ? '▾' : '▸'}</span>
       </button>
 
       {open
         ? (
-          <div style={{ padding: '0 2px 14px' }}>
+          <div style={{ borderTop: '1px solid var(--dsw-alias-border-l2)', margin: '0 16px', paddingBottom: '8px' }}>
             {/* ---- status ---- */}
             <div style={rowStyle}>
               <span style={{ fontSize: '13px' }}>{trayRunning ? t('status.trayRunning') : t('status.trayStopped')}</span>
@@ -256,14 +326,14 @@ export function TrayCard(props: TrayCardProps) {
             </div>
             {status !== null
               ? (
-                <p style={hintStyle}>
+                <p style={descStyle}>
                   {t('status.trayPath')}: {status.trayPath ?? '—'}
                 </p>
               )
               : null}
-            {noExe ? <p style={{ ...hintStyle, color: 'rgba(220, 140, 60, 0.95)' }}>{t('action.noTrayExe')}</p> : null}
-            {error !== null ? <p style={{ ...hintStyle, color: 'rgba(220, 90, 90, 0.95)' }} role="status">{error}</p> : null}
-            {notice !== null ? <p style={{ ...hintStyle, color: 'rgba(120, 190, 120, 0.95)' }} role="status">{notice}</p> : null}
+            {noExe ? <p style={{ ...descStyle, color: 'var(--dsw-alias-state-warn-primary)' }}>{t('action.noTrayExe')}</p> : null}
+            {error !== null ? <p style={{ ...descStyle, color: 'var(--dsw-alias-state-error-primary)' }} role="status">{error}</p> : null}
+            {notice !== null ? <p style={{ ...descStyle, color: 'var(--dsw-alias-state-success-primary)' }} role="status">{notice}</p> : null}
 
             {/* ---- actions ---- */}
             <div style={rowStyle}>
@@ -306,7 +376,7 @@ export function TrayCard(props: TrayCardProps) {
                 placeholder="C:\...\DshTray.exe"
                 onChange={(event) => { setTrayPath(event.target.value); setSaved(false) }}
               />
-              <p style={hintStyle}>{t('form.trayPathHint')}</p>
+              <p style={descStyle}>{t('form.trayPathHint')}</p>
 
               <label style={{ fontSize: '13px', display: 'block', marginTop: '10px' }} htmlFor="dsh-tray-port">
                 {t('form.port')}
@@ -319,12 +389,12 @@ export function TrayCard(props: TrayCardProps) {
                 value={port}
                 onChange={(event) => { setPort(event.target.value); setSaved(false) }}
               />
-              <p style={hintStyle}>{t('form.portHint')}</p>
+              <p style={descStyle}>{t('form.portHint')}</p>
 
               <div style={rowStyle}>
                 <button
                   type="button"
-                  style={buttonStyle}
+                  style={primaryButtonStyle}
                   disabled={busy !== null}
                   onClick={() => { void save() }}
                 >
