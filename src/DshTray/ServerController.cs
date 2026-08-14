@@ -44,6 +44,30 @@ internal static class ServerController
         }
     }
 
+    /// <summary>
+    /// 持续 HTTP 就绪确认：要求连续两次探测成功才算就绪。
+    /// 避免「端口刚监听但服务尚未真正可服务」时误报完成（单次探测太宽松）。
+    /// </summary>
+    public static bool WaitHttpReady(int port, int timeoutMs)
+    {
+        var deadline = Environment.TickCount64 + timeoutMs;
+        var successes = 0;
+        while (Environment.TickCount64 < deadline)
+        {
+            if (ProbeHttp(port, 2000))
+            {
+                successes++;
+                if (successes >= 2) return true;
+            }
+            else
+            {
+                successes = 0;
+            }
+            Thread.Sleep(800);
+        }
+        return successes >= 2;
+    }
+
     /// <summary>端口是否被监听（TCP 连接是否可建立）。</summary>
     public static bool PortOpen(int port)
     {
@@ -235,7 +259,7 @@ internal static class ServerController
     /// 3) 应用目录 start-dsh.cmd 兜底（保留用户自定义）。
     /// 每一步都记日志并捕获异常，输出重定向到 ~/.dsh-tray-server.log。
     /// </summary>
-    public static bool StartServer(ServerInfo captured, int port, string appDir, string logPath)
+    public static bool StartServer(ServerInfo captured, int port, string appDir, string logPath, Action<string>? onProgress = null)
     {
         var serverLog = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".dsh-tray-server.log");
 
@@ -245,8 +269,9 @@ internal static class ServerController
             var node = ResolveExecutable("node");
             if (node is not null)
             {
-                var cmdline = $"cd /d \"{captured.WorkingDirectory}\" && \"\"{node}\" --import tsx/esm apps/cli/src/bin.ts web >> \"{serverLog}\" 2>&1\"";
-                if (SpawnCmd(cmdline, captured.WorkingDirectory, port, logPath, "inline(cwd)"))
+                // 兜底命令必须带上目标端口，否则会按 dsh 默认 3080 启动（配置非 3080 时起错端口）
+                var cmdline = $"cd /d \"{captured.WorkingDirectory}\" && \"\"{node}\" --import tsx/esm apps/cli/src/bin.ts web --host 127.0.0.1 --port {port} >> \"{serverLog}\" 2>&1\"";
+                if (SpawnCmd(cmdline, captured.WorkingDirectory, port, logPath, "inline(cwd)", onProgress))
                     return true;
             }
         }
@@ -265,12 +290,13 @@ internal static class ServerController
                 if (exe is null)
                 {
                     Log(logPath, $"重放跳过：无法解析可执行文件 {argv[0]}，改用兜底启动");
+                    onProgress?.Invoke($"重放跳过：无法解析 {argv[0]}，改用兜底启动");
                 }
                 else
                 {
                     var args = string.Join(' ', argv.Skip(1).Select(QuoteArg));
                     var cmdline = $"\"\"{exe}\" {args} >> \"{serverLog}\" 2>&1\"";
-                    if (SpawnCmd(cmdline, captured.WorkingDirectory, port, logPath, $"replay({exe})"))
+                    if (SpawnCmd(cmdline, captured.WorkingDirectory, port, logPath, $"replay({exe})", onProgress))
                         return true;
                 }
             }
@@ -280,19 +306,20 @@ internal static class ServerController
         var cmd = Path.Combine(appDir, "start-dsh.cmd");
         if (File.Exists(cmd))
         {
-            if (SpawnCmd($"\"\"{cmd}\"\"", appDir, port, logPath, "start-dsh.cmd"))
+            if (SpawnCmd($"\"\"{cmd}\"\"", appDir, port, logPath, "start-dsh.cmd", onProgress))
                 return true;
         }
         else
         {
             Log(logPath, $"start-dsh.cmd 不存在: {cmd}");
+            onProgress?.Invoke($"start-dsh.cmd 不存在: {cmd}");
         }
         return false;
     }
 
     /// <summary>通过 cmd.exe 执行一条启动命令并等待端口监听；任何异常记日志并返回 false。
     /// 子进程提前退出（如端口冲突 EADDRINUSE）时快速失败，不傻等 60s。</summary>
-    private static bool SpawnCmd(string commandLine, string cwd, int port, string logPath, string label)
+    private static bool SpawnCmd(string commandLine, string cwd, int port, string logPath, string label, Action<string>? onProgress = null)
     {
         try
         {
@@ -307,31 +334,45 @@ internal static class ServerController
             if (p is null)
             {
                 Log(logPath, $"{label}: Process.Start 返回 null");
+                onProgress?.Invoke($"{label}: Process.Start 返回 null");
                 return false;
             }
             Log(logPath, $"{label}: 已启动 (cwd={cwd}, pid={p.Id})");
+            onProgress?.Invoke($"{label}: 已启动 (pid={p.Id}, cwd={cwd})");
             // 等待端口监听或进程提前退出（两者取先，上限 60s）
             var deadline = Environment.TickCount64 + 60000;
+            var lastLog = Environment.TickCount64;
             while (Environment.TickCount64 < deadline)
             {
                 if (PortOpen(port)) return true;
                 if (p.HasExited) break;
+                // 每 10s 提示一次等待进度，避免进度窗看起来卡死
+                if (Environment.TickCount64 - lastLog >= 10000)
+                {
+                    lastLog = Environment.TickCount64;
+                    var elapsed = (Environment.TickCount64 - deadline + 60000) / 1000;
+                    Log(logPath, $"{label}: 等待端口 {port}… (已 {elapsed}s)");
+                    onProgress?.Invoke($"{label}: 等待端口 {port}… (已 {elapsed}s)");
+                }
                 Thread.Sleep(300);
             }
             if (PortOpen(port)) return true;
             if (p.HasExited)
             {
                 Log(logPath, $"{label}: 进程提前退出 (exit={p.ExitCode})，可能端口冲突或启动失败（见 .dsh-tray-server.log）");
+                onProgress?.Invoke($"{label}: 进程提前退出 (exit={p.ExitCode})");
             }
             else
             {
                 Log(logPath, $"{label}: 60s 内端口 {port} 未监听，启动可能失败");
+                onProgress?.Invoke($"{label}: 60s 内端口 {port} 未监听");
             }
             return false;
         }
         catch (Exception ex)
         {
             Log(logPath, $"{label}: 启动异常: {ex.Message}");
+            onProgress?.Invoke($"{label}: 启动异常: {ex.Message}");
             return false;
         }
     }
@@ -395,7 +436,7 @@ internal static class ServerController
             rem 默认：从本机 dev checkout 启动（全路径 node，输出进 .dsh-tray-server.log）。
             title DeepSeek Harness Server
             cd /d "{harness}"
-            "{node}" --import tsx/esm apps/cli/src/bin.ts web >> "{log}" 2>&1
+            "{node}" --import tsx/esm apps/cli/src/bin.ts web --host 127.0.0.1 --port {port} >> "{log}" 2>&1
             """;
     }
 

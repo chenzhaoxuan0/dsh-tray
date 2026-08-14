@@ -162,10 +162,18 @@ internal static class Program
             ServerController.Log(LogPath, info.Pid > 0
                 ? $"开始重启：停止 pid={info.Pid} 后重新启动 (cmdline={info.CommandLine}, cwd={info.WorkingDirectory})"
                 : $"端口 {port} 无运行中的服务，直接启动");
+            if (info.Pid > 0)
+            {
+                RestartProgress.Info($"检测到 dsh 服务: pid={info.Pid}，cwd={info.WorkingDirectory}");
+            }
+            else
+            {
+                RestartProgress.Info("端口无运行中的服务，直接启动");
+            }
 
             if (info.Pid > 0)
             {
-                RestartProgress.Stage(20, $"停止服务 (pid={info.Pid})…");
+                RestartProgress.Stage(15, $"停止服务 (pid={info.Pid})…");
                 var freed = ServerController.KillAllDsh(port);
                 if (!freed)
                 {
@@ -174,30 +182,34 @@ internal static class Program
                     RestartProgress.Fail(msg);
                     return false;
                 }
+                RestartProgress.Info($"服务已停止，端口 {port} 已释放");
             }
 
-            RestartProgress.Stage(40, "清理残留进程…");
+            RestartProgress.Stage(30, "清理残留进程…");
             // 端口释放后稍作稳定，避免 TIME_WAIT / 竞态抢先绑定
             Thread.Sleep(800);
+            RestartProgress.Info("等待端口稳定（TIME_WAIT / 竞态规避）");
 
-            RestartProgress.Stage(55, "启动服务…");
-            var started = ServerController.StartServer(info, port, AppDir, LogPath);
+            RestartProgress.Stage(45, "启动服务…");
+            var started = ServerController.StartServer(info, port, AppDir, LogPath, RestartProgress.Info);
             if (!started)
             {
                 // 竞态兜底：再清扫一次并重试（第一次可能撞上抢先绑定端口的实例）
                 ServerController.Log(LogPath, "首次启动未就绪，清扫残留并重试一次…");
-                RestartProgress.Stage(62, "首次启动受阻，清理并重试…");
+                RestartProgress.Stage(52, "首次启动受阻，清理并重试…");
                 ServerController.KillAllDsh(port);
                 Thread.Sleep(800);
-                RestartProgress.Stage(72, "重新启动服务…");
-                started = ServerController.StartServer(info, port, AppDir, LogPath);
+                RestartProgress.Stage(58, "重新启动服务…");
+                started = ServerController.StartServer(info, port, AppDir, LogPath, RestartProgress.Info);
             }
-            // 端口已监听还不够：确认 HTTP 真的响应（避免端口被无关程序占住时误报成功）
-            RestartProgress.Stage(85, "等待服务就绪…");
-            var ready = started && ServerController.ProbeHttp(port);
+
+            // 端口已监听还不够：持续 HTTP 确认（连续两次成功），避免"端口刚开但服务未就绪"误报完成
+            RestartProgress.Stage(75, "等待服务就绪（HTTP 确认）…");
+            var ready = started && ServerController.WaitHttpReady(port, 30000);
+            RestartProgress.Stage(95, "收尾确认…");
             if (!ready)
             {
-                var msg = "服务未能在 60s 内就绪（详见 .dsh-tray-server.log）";
+                var msg = "服务未能在就绪时限内响应 HTTP（详见 .dsh-tray-server.log）";
                 ServerController.Log(LogPath, "重启失败：" + msg);
                 RestartProgress.Fail(msg + "\r\n" + RestartProgress.ServerLogTail(6));
                 return false;
@@ -355,6 +367,9 @@ internal static class Program
 
             // 重启由独立 worker 进程执行（DshTray.exe --restart）：托盘崩溃也不中断重启；
             // 进度窗口轮询 .dsh-tray-restart.log 实时显示阶段与失败详情。
+            // 先清掉上一次重启的 [ok]/[fail] 残留：否则进度窗首次轮询会读到旧标记，
+            // 进度条瞬间跳到 100%「重启成功」而真正的重启才刚开始。
+            RestartProgress.Reset();
             var progress = new RestartProgressForm(_cfg.Port);
             progress.Show();
 

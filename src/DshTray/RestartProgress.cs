@@ -36,6 +36,25 @@ internal static class RestartProgress
     public static void Ok(string text) => Write($"[ok] {text}");
     public static void Fail(string text) => Write($"[fail] {text}");
 
+    /// <summary>明细级日志（启动尝试/进程 pid/提前退出等），供进度窗转写展示。</summary>
+    public static void Info(string text) => Write($"[info] {text}");
+
+    /// <summary>进度文件当前完整内容（进度窗逐行转写用）。</summary>
+    public static string Transcript()
+    {
+        lock (Gate)
+        {
+            try
+            {
+                return File.Exists(LogPath) ? File.ReadAllText(LogPath) : "";
+            }
+            catch
+            {
+                return "";
+            }
+        }
+    }
+
     /// <summary>清空进度文件（每次重启开始时调用，避免进度窗显示上一次的旧结果）。</summary>
     public static void Reset()
     {
@@ -110,14 +129,16 @@ internal static class RestartProgress
         }
     }
 
-    /// <summary>读取服务器日志尾部（失败详情用）。</summary>
+    /// <summary>读取服务器日志尾部（失败详情用）；以共享读打开，容忍服务进程仍在写入。</summary>
     public static string ServerLogTail(int lines = 8)
     {
         var serverLog = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".dsh-tray-server.log");
         try
         {
             if (!File.Exists(serverLog)) return "(无 .dsh-tray-server.log)";
-            var all = File.ReadAllLines(serverLog);
+            using var fs = new FileStream(serverLog, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+            using var reader = new StreamReader(fs);
+            var all = reader.ReadToEnd().Split('\n');
             return string.Join('\n', all.Skip(Math.Max(0, all.Length - lines)));
         }
         catch (Exception ex)
