@@ -298,10 +298,19 @@ internal static class Program
         private readonly ToolStripMenuItem _exitItem;
         private bool _busy;
 
+        /// <summary>
+        /// UI 线程 marshaler：无主窗体的托盘程序靠它把回调投递回 UI 线程。
+        /// 不能依赖 WindowsFormsSynchronizationContext.Current —— 它在后台线程为 null，
+        /// 而在后台线程 new 一个会绑到没有消息泵的线程上，Post 永不投递（菜单恢复失效）。
+        /// 这个隐藏 Control 在 UI 线程创建，BeginInvoke 必定回到 UI 线程消息泵。
+        /// </summary>
+        private readonly Control _ui;
+
         public TrayAppContext(TrayConfig cfg, Icon? icon, string log, string appDir)
         {
             _cfg = cfg;
             _log = log;
+            _ui = new Control(); // 必须在 UI 线程创建（构造函数在 Application.Run 内执行）
 
             _tray = new NotifyIcon
             {
@@ -322,7 +331,7 @@ internal static class Program
             _exitItem.Click += (_, _) => OnExit();
             _tray.DoubleClick += (_, _) => OpenWebUi(cfg.Port);
 
-            // 启动时自检：服务是否在跑
+            // 启动时自检：服务是否在跑（气泡切回 UI 线程弹出）
             System.Threading.Tasks.Task.Run(() =>
             {
                 var info = ServerController.Inspect(cfg.Port);
@@ -332,7 +341,7 @@ internal static class Program
                         : $"端口 {cfg.Port} 被其他程序占用，'重启' 将拒绝操作。")
                     : $"未检测到运行中的 dsh 服务。'重启' 将按 start-dsh.cmd 启动。";
                 ServerController.Log(_log, "启动自检: " + msg);
-                ShowBalloon("DeepSeek Harness", msg, ToolTipIcon.Info);
+                BeginInvoke(() => ShowBalloon("DeepSeek Harness", msg, ToolTipIcon.Info));
             });
         }
 
@@ -387,15 +396,26 @@ internal static class Program
                 }
                 BeginInvoke(() =>
                 {
-                    progress.Settle();
-                    _busy = false;
-                    _restartItem.Enabled = true;
-                    _exitItem.Enabled = true;
-                    _tray.Text = $"DeepSeek Harness (port {_cfg.Port})";
-                    var (_, _, _, ok, detail) = RestartProgress.Snapshot();
-                    ShowBalloon("DeepSeek Harness",
-                        ok ? "服务已重启。" : "重启失败：" + detail,
-                        ok ? ToolTipIcon.Info : ToolTipIcon.Error);
+                    // 收尾必须无条件执行：任何异常都不允许留下"永久置灰"的菜单。
+                    try
+                    {
+                        progress.Settle();
+                        var (_, _, _, ok, detail) = RestartProgress.Snapshot();
+                        ShowBalloon("DeepSeek Harness",
+                            ok ? "服务已重启。" : "重启失败：" + detail,
+                            ok ? ToolTipIcon.Info : ToolTipIcon.Error);
+                    }
+                    catch (Exception ex)
+                    {
+                        ServerController.Log(_log, $"重启收尾异常（已兜底）: {ex.Message}");
+                    }
+                    finally
+                    {
+                        _busy = false;
+                        _restartItem.Enabled = true;
+                        _exitItem.Enabled = true;
+                        _tray.Text = $"DeepSeek Harness (port {_cfg.Port})";
+                    }
                 });
             });
         }
@@ -425,18 +445,17 @@ internal static class Program
             });
         }
 
-        /// <summary>把回调切回 UI 线程执行。</summary>
+        /// <summary>把回调切回 UI 线程执行（经 UI 线程创建的隐藏 Control 投递，必定送达消息泵）。</summary>
         private void BeginInvoke(Action action)
         {
             try
             {
-                var ctxt = WindowsFormsSynchronizationContext.Current
-                    ?? new WindowsFormsSynchronizationContext();
-                ctxt.Post(_ => action(), null);
+                _ui.BeginInvoke(action);
             }
             catch
             {
-                action();
+                // 应用已退出等极端情况：就地执行兜底
+                try { action(); } catch { }
             }
         }
 
