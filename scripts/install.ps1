@@ -36,7 +36,12 @@ $json.dependencies | Add-Member -NotePropertyName "dsh-tray-plugin" -NotePropert
 if ($json.dsh.profile.bundles -notcontains "dsh-tray-plugin") {
     $json.dsh.profile.bundles += "dsh-tray-plugin"
 }
-$json | ConvertTo-Json -Depth 10 | Set-Content $profilePkg -Encoding UTF8
+# 必须以「无 BOM」写回 profile manifest：Windows PowerShell 5.1 的
+# Set-Content -Encoding UTF8 会写入 UTF-8 BOM，带 BOM 的 profile package.json
+# 会触发 harness 解析异常与皮肤重复 entry（duplicate loader entry id），
+# 导致 dsh web 重启后无法启动。用 .NET 显式写无 BOM UTF-8（两个 PowerShell 版本通用）。
+$jsonText = $json | ConvertTo-Json -Depth 10
+[System.IO.File]::WriteAllText($profilePkg, $jsonText, (New-Object System.Text.UTF8Encoding($false)))
 pnpm install --dir $profileDir
 Write-Host "插件已注册到 profile: $profileDir" -ForegroundColor Green
 

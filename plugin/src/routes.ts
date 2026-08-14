@@ -9,7 +9,7 @@
  */
 
 import { spawn, execFile } from 'node:child_process'
-import { existsSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { createConnection } from 'node:net'
@@ -175,6 +175,59 @@ function portOpen(port: number): Promise<boolean> {
   })
 }
 
+/** 重启进度快照（由托盘 worker 写入 %USERPROFILE%\.dsh-tray-restart.log，Web 卡片轮询展示）。 */
+export interface RestartProgressView {
+  /** 是否仍在进行（尚无 [ok]/[fail] 标记）。 */
+  running: boolean
+  /** 当前阶段百分比（0-100；无文件时 0）。 */
+  percent: number
+  /** 当前阶段文案。 */
+  stage: string
+  /** 是否已结束（[ok]/[fail] 落盘）。 */
+  done: boolean
+  /** 结束结果：成功。 */
+  ok: boolean
+  /** 结束详情（[ok]/[fail] 后的文字）。 */
+  detail: string
+  /** 进度文件完整转写（明细展示用）。 */
+  transcript: string
+}
+
+/** 解析重启进度文件（无文件/读取失败时返回空快照）。 */
+export function readRestartProgress(): RestartProgressView {
+  const logPath = join(homedir(), '.dsh-tray-restart.log')
+  let transcript = ''
+  try {
+    transcript = existsSync(logPath) ? readFileSync(logPath, 'utf8') : ''
+  } catch {
+    transcript = ''
+  }
+  let percent = 0
+  let stage = '准备中…'
+  let done = false
+  let ok = false
+  let detail = ''
+  for (const rawLine of transcript.split('\n')) {
+    const line = rawLine.trim()
+    const stageMatch = /\[stage\]\s+(\d+)\s+(.*)$/.exec(line)
+    if (stageMatch !== null) {
+      percent = Number(stageMatch[1])
+      if (Number.isFinite(percent)) stage = stageMatch[2] ?? ''
+      continue
+    }
+    if (line.includes('[ok]')) {
+      done = true
+      ok = true
+      detail = line.slice(line.indexOf('[ok]') + 4).trim()
+    } else if (line.includes('[fail]')) {
+      done = true
+      ok = false
+      detail = line.slice(line.indexOf('[fail]') + 6).trim()
+    }
+  }
+  return { running: !done, percent, stage, done, ok, detail, transcript }
+}
+
 /** Build the /api/dsh-tray route family. */
 export function makeRoutes(getConfig: () => TrayConfig): { routes: WebRoute[] } {
   const routes: WebRoute[] = [
@@ -198,6 +251,18 @@ export function makeRoutes(getConfig: () => TrayConfig): { routes: WebRoute[] } 
           serverPid,
         }
         writeJson(res, 200, { ok: true, status })
+      },
+    },
+    {
+      kind: 'exact',
+      path: `${TRAY_API}/restart-progress`,
+      handler: async (req, res) => {
+        if (!isLoopbackRequest(req) || (req.method ?? 'GET') !== 'GET') {
+          writeJson(res, isLoopbackRequest(req) ? 405 : 403, { error: 'forbidden or method not allowed' })
+          return
+        }
+        // 读托盘 worker 的进度文件（进程内重启也会写同一文件），Web 卡片轮询它渲染进度条。
+        writeJson(res, 200, { ok: true, progress: readRestartProgress() })
       },
     },
     {

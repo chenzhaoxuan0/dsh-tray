@@ -30,12 +30,25 @@ export interface TrayStatus {
 /** One action the card can trigger on the host. */
 export type TrayAction = 'show' | 'restart' | 'exit'
 
+/** 重启进度快照（host 读托盘 worker 写的 .dsh-tray-restart.log）。 */
+export interface RestartProgressView {
+  running: boolean
+  percent: number
+  stage: string
+  done: boolean
+  ok: boolean
+  detail: string
+  transcript: string
+}
+
 /** The registration-side face the card's slot entry injects. */
 export interface TrayCardFace {
   /** Fetch the current tray/service status from the host. */
   status: () => Promise<TrayStatus>
   /** Trigger one host action. */
   run: (action: TrayAction) => Promise<{ ok: boolean; error?: string }>
+  /** Fetch the restart progress snapshot (worker writes .dsh-tray-restart.log). */
+  progress: () => Promise<RestartProgressView>
   /** Read the current effective settings snapshot. */
   snapshot: () => SettingsScopeSnapshot<TraySettings>
   /** Write one settings field (trayPath / port). */
@@ -78,6 +91,10 @@ export class TrayCardController {
         } catch (error) {
           return { ok: false, error: error instanceof Error ? error.message : String(error) }
         }
+      },
+      progress: async () => {
+        const payload = await TrayCardController.fetchJson<{ ok: true; progress: RestartProgressView }>('/api/dsh-tray/restart-progress')
+        return payload.progress
       },
       snapshot: () => this.scope.getSnapshot(),
       setField: async (field, value) => {
@@ -235,10 +252,45 @@ export function TrayCard(props: TrayCardProps) {
   const [busy, setBusy] = useState<TrayAction | 'saving' | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [progress, setProgress] = useState<RestartProgressView | null>(null)
   const [trayPath, setTrayPath] = useState('')
   const [port, setPort] = useState('3080')
   const [saved, setSaved] = useState(false)
   const seeded = useRef(false)
+  const pollRef = useRef<number | null>(null)
+
+  const stopPolling = (): void => {
+    if (pollRef.current !== null) {
+      window.clearInterval(pollRef.current)
+      pollRef.current = null
+    }
+  }
+
+  /** 重启触发后轮询 /api/dsh-tray/restart-progress（worker 写的进度文件）。
+   *  服务重启断连期间轮询会失败：忽略，等新服务起来后继续读到 [ok]/[fail]。 */
+  const startPolling = (): void => {
+    if (pollRef.current !== null) return
+    const startedAt = Date.now()
+    const tick = async (): Promise<void> => {
+      if (Date.now() - startedAt > 4 * 60 * 1000) {
+        stopPolling()
+        return
+      }
+      try {
+        const view = await props.progress()
+        setProgress(view)
+        if (view.done) {
+          stopPolling()
+          setNotice(view.ok ? t('action.restartDone') : `${t('action.restartFailed')}: ${view.detail}`)
+          void refresh()
+        }
+      } catch {
+        // 服务重启中断连：忽略，继续轮询
+      }
+    }
+    void tick()
+    pollRef.current = window.setInterval(() => { void tick() }, 600)
+  }
 
   const refresh = async (): Promise<void> => {
     try {
@@ -257,7 +309,14 @@ export function TrayCard(props: TrayCardProps) {
     }
   }
 
-  useEffect(() => { void refresh() }, [])
+  useEffect(() => {
+    void refresh()
+    // 若托盘侧正在重启（worker 进度进行中），卡片打开即显示进度
+    void props.progress().then((view) => {
+      if (view.running) startPolling()
+    }).catch(() => undefined)
+    return stopPolling
+  }, [])
 
   const run = async (action: TrayAction): Promise<void> => {
     if (action === 'restart' && !window.confirm(t('action.restartConfirm'))) return
@@ -271,9 +330,12 @@ export function TrayCard(props: TrayCardProps) {
       setError(result.error ?? t('error.transport'))
       return
     }
-    if (action === 'restart') setNotice(t('action.restarting'))
-    else if (action === 'exit') setNotice(t('action.exiting'))
-    else {
+    if (action === 'restart') {
+      setNotice(t('action.restarting'))
+      startPolling()
+    } else if (action === 'exit') {
+      setNotice(t('action.exiting'))
+    } else {
       setNotice(null)
       void refresh()
     }
@@ -340,6 +402,52 @@ export function TrayCard(props: TrayCardProps) {
             {noExe ? <p style={{ ...descStyle, color: 'var(--dsw-alias-state-warn-primary)' }}>{t('action.noTrayExe')}</p> : null}
             {error !== null ? <p style={{ ...descStyle, color: 'var(--dsw-alias-state-error-primary)' }} role="status">{error}</p> : null}
             {notice !== null ? <p style={{ ...descStyle, color: 'var(--dsw-alias-state-success-primary)' }} role="status">{notice}</p> : null}
+
+            {/* ---- restart progress ---- */}
+            {progress !== null
+              ? (
+                <div style={{ margin: '10px 0', padding: '10px 12px', border: '1px solid var(--dsw-alias-border-l2)', borderRadius: '8px', background: 'var(--dsw-alias-bg-layer-1)' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '8px', marginBottom: '6px' }}>
+                    <span style={{ fontSize: '13px', fontWeight: 600 }}>{progress.stage}</span>
+                    <span style={{ fontSize: '12px', opacity: 0.75, flex: 'none' }}>
+                      {progress.done ? (progress.ok ? t('progress.done') : t('progress.failed')) : `${progress.percent}%`}
+                    </span>
+                  </div>
+                  <div style={{ height: '8px', borderRadius: '4px', background: 'var(--dsw-alias-bg-layer-3)', overflow: 'hidden' }}>
+                    <div
+                      style={{
+                        height: '100%',
+                        width: `${Math.min(100, Math.max(0, progress.percent))}%`,
+                        background: progress.done && !progress.ok
+                          ? 'var(--dsw-alias-state-error-primary)'
+                          : 'var(--dsw-alias-state-business-primary)',
+                        transition: 'width .3s ease',
+                      }}
+                    />
+                  </div>
+                  {progress.done && !progress.ok && progress.detail !== ''
+                    ? <p style={{ ...descStyle, color: 'var(--dsw-alias-state-error-primary)', margin: '8px 0 0' }}>{progress.detail}</p>
+                    : null}
+                  {progress.transcript !== ''
+                    ? (
+                      <pre style={{
+                        margin: '8px 0 0',
+                        maxHeight: '150px',
+                        overflow: 'auto',
+                        fontSize: '11px',
+                        lineHeight: 1.55,
+                        whiteSpace: 'pre-wrap',
+                        wordBreak: 'break-all',
+                        color: 'var(--dsw-alias-label-secondary)',
+                        fontFamily: 'Consolas, monospace',
+                      }}>
+                        {progress.transcript.slice(-1500)}
+                      </pre>
+                    )
+                    : null}
+                </div>
+              )
+              : null}
 
             {/* ---- actions ---- */}
             <div style={rowStyle}>
