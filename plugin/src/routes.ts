@@ -123,17 +123,21 @@ export function resolveTrayExe(cfg: Pick<TrayConfig, 'trayPath'>): string | null
  * the parent-child tree. If the worker were spawned directly here (inside the
  * server's Node process), it would be a child of the server and get killed by
  * its own cleanup — the restart would stop dead right after "停止服务…"
- * (verified: plain spawn leaves the port down). Spawning via
- * `cmd /c start "" "exe"` makes cmd exit immediately, orphaning the DshTray
- * process so it no longer belongs to the server's tree and survives the kill
- * to complete the restart (the tray icon survives too). Note: do NOT use
- * `start /b` — it shares the console and hangs/behaves oddly for GUI apps.
+ * (verified: plain spawn leaves the port down).
+ *
+ * Method: PowerShell Start-Process. Verified empirically that `cmd /c start`
+ * does NOT launch this WinExe at all (silent no-op), and plain spawn dies with
+ * the server. Start-Process launches an independent process; the powershell
+ * parent exits within ~1s, so the tray/worker is orphaned long before the
+ * restart worker reaches the kill (Inspect takes seconds) and survives the
+ * tree-kill.
  */
 function spawnTray(exe: string, args: readonly string[]): { ok: true } | { ok: false; error: string } {
   try {
-    const argString = args.map((a) => (a.includes(' ') ? `"${a}"` : a)).join(' ')
-    const cmdLine = `start "" "${exe}" ${argString}`
-    const child = spawn('cmd.exe', ['/c', cmdLine], {
+    const quotePs = (s: string): string => `'${s.replace(/'/g, "''")}'`
+    const argPart = args.length > 0 ? ` -ArgumentList ${args.map(quotePs).join(',')}` : ''
+    const ps = `Start-Process -FilePath ${quotePs(exe)}${argPart} -WindowStyle Hidden`
+    const child = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-Command', ps], {
       stdio: 'ignore',
       windowsHide: true,
     })
@@ -331,13 +335,13 @@ export function makeRoutes(getConfig: () => TrayConfig): { routes: WebRoute[] } 
           return
         }
 
-        // 托盘未运行：直接 spawn（cmd start 孤儿化，脱离服务器树；见 spawnTray 注释）。
+        // 托盘未运行：直接 spawn（PowerShell Start-Process 孤儿化，脱离服务器树；见 spawnTray 注释）。
         const args = action === 'show'
           ? []
           : action === 'restart'
             ? ['--restart', '--port', String(cfg.port)]
             : ['--stop', '--port', String(cfg.port)]
-        logTrayLine(`动作 ${action}：${trayRunning ? '托盘在运行（show 无操作）' : '托盘未运行，直接 spawn DshTray.exe ' + args.join(' ') + '（cmd start 脱离进程树）'}`)
+        logTrayLine(`动作 ${action}：${trayRunning ? '托盘在运行（show 无操作）' : '托盘未运行，直接 spawn DshTray.exe ' + args.join(' ') + '（PowerShell Start-Process 脱离进程树）'}`)
         if (action === 'show' && trayRunning) {
           writeJson(res, 200, { ok: true, action, note: 'tray already running' })
           return
