@@ -1,0 +1,7 @@
+# dsh-tray-plugin bundle patch: inserts the plugin row into the web profile
+# roster. The node half (exports ".") runs in the host process (tray /api
+# routes, DshTray.exe spawning), and the dsh.client declaration in package.json
+# makes the browser half (exports "./client") load in the web GUI.
+- insert:
+    - id: dsh-tray
+      name: 'dsh-tray-plugin'

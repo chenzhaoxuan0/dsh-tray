@@ -1,111 +1,114 @@
 # dsh-tray
 
-> DeepSeek Harness 的 Windows 系统托盘控制器：右键菜单只有两项 —— **重启** / **退出**。
+> DeepSeek Harness 的**托盘 + Web 设置插件**单一仓库：系统托盘图标（右键菜单只有 **重启 / 退出**）+
+> Web 设置页里的「显示托盘图标 / 重启 / 退出」卡片。两个入口驱动同一个托盘程序，一次安装全部到位。
 
 ![GitHub License](https://img.shields.io/badge/license-MIT-blue)
 
-## 为什么不是插件？
+## 这是什么
 
-开始前先看了官方插件开发文档 [develop/basic](https://deepseek-harness.github.io/deepseek-harness/develop/basic/)（本地对应 `deepseek-harness/docs/user/develop/basic/index.zh.md`）：
+一个仓库包含两个组件，功能相同、入口不同：
 
-- 插件是**进程内**模块：导出 `apply(ctx)` 的 TS 文件，通过 `ctx` 注册工具（tools）、服务（services）、浏览器 UI（Slots）等能力；
-- **没有任何原生系统托盘能力**——Node 进程没有托盘 API，DSH 也没有提供托盘服务；
-- 托盘图标、右键菜单本质上是 Windows 原生外壳元素，必须有一个独立的原生进程来承载；就算做成插件，插件最终也还是要拉起一个外部托盘程序，而"重启/退出"还需要控制宿主进程本身，这在进程内部做非常别扭。
+| 组件 | 位置 | 作用 |
+| --- | --- | --- |
+| **托盘程序** `DshTray.exe` | `src/DshTray`（C# WinForms） | 系统托盘图标，右键菜单：**重启** / **退出** |
+| **Web 设置插件** `dsh-tray-plugin` | `plugin/`（DSH 官方 SDK） | 设置 -> 插件 页面卡片：**显示托盘图标 / 重启 / 退出** + 实时状态 + 配置表单 |
 
-结论：**托盘不适合做成 Cordis 插件**，最自然的形态是独立的 Windows 小工具——与本机已有的 [dsh-launcher](https://github.com/Ruler4396/dsh-launcher)（C# WinForms / WebView2，.NET 10）同一技术栈。本仓库的 `ServerController` 逻辑（按端口找进程、识别、杀树、重放启动）将来若需要，可直接合并进 dsh-launcher 作为其托盘功能。
+两者的「重启 / 退出」都由 `DshTray.exe` 执行：按端口找到 dsh 服务进程，捕获其**命令行 + 工作目录**，
+杀掉进程树后用完全相同的命令重放拉起（支持 `pnpm dsh web` / 源码 `node ... bin.ts web` / `npx @deepseek-ai/dsh` 等任意启动方式）。
 
-## 功能
+## 为什么不是纯插件？
 
-- 🖥️ **系统托盘图标**：常驻通知区域，图标取自 dsh-launcher（DeepSeek 品牌图标，仅个人本地使用）
-- 🖱️ **右键菜单恰好两项**：
-  - **重启**：停止当前 dsh 服务 → 用**完全相同的命令行 + 工作目录**重新拉起（从正在运行的进程实况捕获，支持 `pnpm dsh web` / 源码 `node ... bin.ts web` / `npx @deepseek-ai/dsh web` 等任意启动方式）
-  - **退出**：停止 dsh 服务并退出托盘
-- 🖱️ **双击图标**：用默认浏览器打开 `http://127.0.0.1:3080`
-- 🛡️ **防误杀**：只操作被识别为 dsh 的进程（端口有 HTTP 响应 **且** 命令行带 `dsh`/`harness`/`bin.ts`/`@deepseek-ai` 等特征）；端口被其他程序占用时拒绝操作并提示
-- 📋 **日志**：`%USERPROFILE%\.dsh-tray.log`
+DSH 插件是进程内模块，框架没有任何原生系统托盘能力（见官方 [develop/basic](https://deepseek-harness.github.io/deepseek-harness/develop/basic/)）。
+托盘图标、右键菜单是 Windows 原生外壳元素，必须由独立原生进程承载；「重启 / 退出」还需要控制宿主进程本身，
+在进程内部做很别扭。因此：托盘用 C# 小程序（与 dsh-launcher 同技术栈），Web 入口用官方 SDK 插件，两者通过 `DshTray.exe` 的 CLI 协同。
 
-## 构建
+## 快速安装（一键）
 
-需要 [.NET SDK 10](https://dotnet.microsoft.com/)（本机已装 10.0.400；运行还需要 .NET Desktop Runtime 10，与 dsh-launcher 相同）。
+需要：.NET SDK 10（构建托盘）、Node.js 18+ 与 pnpm（构建插件）、已安装 dsh 并启动过目标 profile。
 
 ```powershell
-powershell -File scripts\build.ps1            # 框架依赖单文件（默认）
-powershell -File scripts\build.ps1 -SelfContained  # 打包完整运行时，目标机免装 .NET
+powershell -ExecutionPolicy Bypass -File scripts\install.ps1          # 默认 profile: web
+powershell -ExecutionPolicy Bypass -File scripts\install.ps1 -Profile web
 ```
 
-产物：`src\DshTray\bin\Release\net10.0-windows\win-x64\publish\DshTray.exe`
+脚本做四件事：
+
+1. 构建托盘程序并把 `DshTray.exe` 复制到 `%LOCALAPPDATA%\dsh-tray\`（插件自动检测的首选位置）；
+2. `pnpm install && pnpm build` 构建 `plugin/` 设置插件；
+3. 把插件注册进 `~/.dsh/profiles/<profile>/package.json`（dependencies + bundles，幂等）并 `pnpm install`；
+4. 提示重启。
+
+然后**重启 dsh 服务**（托盘右键 -> 重启，或手动），浏览器硬刷新，进入 **设置 -> 插件** 即可看到卡片。
+
+## 手动安装
+
+```powershell
+# 1. 构建托盘
+powershell -File scripts\build.ps1                 # 产物: src\DshTray\bin\Release\net10.0-windows\win-x64\publish\DshTray.exe
+powershell -File scripts\build.ps1 -SelfContained  # 打包完整 .NET 运行时，目标机免装
+
+# 2. 构建插件
+cd plugin && pnpm install && pnpm build            # 产物: plugin\lib\{index,routes,client}.js
+
+# 3. 挂载到 profile（把 <仓库路径> 换成实际路径）
+#    编辑 ~/.dsh/profiles/web/package.json：
+#      "dependencies": { ..., "dsh-tray-plugin": "link:<仓库路径>/plugin" }
+#      "dsh": { "profile": { "bundles": [ ..., "dsh-tray-plugin" ] } }
+pnpm install --dir ~/.dsh/profiles/web
+
+# 4. 重启 dsh web + 浏览器硬刷新
+```
 
 ## 使用
 
-```powershell
-# 直接运行（单实例：重复启动自动忽略）
-.\publish\DshTray.exe
-```
+**托盘**（直接运行 `DshTray.exe`）：
 
-首次运行会在 exe 同目录生成：
+- 右键菜单恰好两项：**重启** / **退出**；双击图标打开 `http://127.0.0.1:3080`；
+- 单实例；日志 `%USERPROFILE%\.dsh-tray.log`。
 
-- `start-dsh.cmd` —— 兜底启动命令（仅当无法捕获正在运行进程的命令行时使用），可自行编辑；
-- `tray.config.json` —— 可选配置：
+**Web 设置插件**（设置 -> 插件 -> dsh-tray 卡片）：
 
-```json
-{
-  "port": 3080,             // 服务端口
-  "stopServerOnExit": true  // 托盘"退出"时是否同时停止 dsh 服务
-}
-```
+- 实时状态：托盘图标运行中/未运行、dsh 服务运行中（pid）/未运行、托盘程序路径；
+- 三个按钮：**显示托盘图标** / **重启** / **退出**（重启/退出有确认弹窗，会断开当前服务）；
+- 配置表单：`trayPath`（留空自动检测）+ `port`（默认 3080），保存写入 `~/.dsh/settings.yaml` 的 `dsh-tray` 段。
 
-想开机自启：`Win+R` → `shell:startup` → 把 `DshTray.exe` 的快捷方式放进去即可。
-
-## 重启/退出到底做了什么
-
-```
-重启：netstat 找 3080 监听 PID → 校验是 dsh（HTTP 探测 + 命令行特征）
-     → 捕获该进程的完整命令行 + 工作目录（PEB 读取）
-     → taskkill 杀进程树 → 等端口释放
-     → 用捕获的命令行在同样的工作目录重新启动（分离、无窗口）
-     → 等端口就绪 + HTTP 探测通过 → 气泡提示结果
-退出：同上的识别 → 停止 dsh 服务 → 退出托盘
-```
-
-注意：**重启后，当初手动启动 dsh 的那个终端会显示命令已结束**（原来的进程被杀掉了），新的服务是托盘拉起的独立进程，不依赖托盘存活。
-
-## CLI 模式（测试 / 脚本化）
-
-无托盘运行，便于验证与自动化：
-
-```powershell
-DshTray.exe --status            # 输出端口上的进程信息（pid / 是否 dsh / 命令行 / 工作目录）
-DshTray.exe --restart           # 执行一次重启
-DshTray.exe --stop              # 停止服务
-DshTray.exe --test-capture      # 只读：验证命令行与工作目录捕获
-DshTray.exe --port 3099 --status # 指定端口（默认 3080）
-```
-
-## 测试
-
-仓库在 3099 端口用合成 HTTP 服务（命令行含 `harness` 特征）做了完整验证：
-
-```
-synthetic pid=11368 → --restart → pid=2148（新进程，同命令行同 cwd，HTTP 正常）
---stop → 端口释放，进程消失
-```
-
-对本机真实服务（3080，即本会话所在进程）只做了**只读**检查：`--status` / `--test-capture` 均正确识别出
-`node --import tsx/esm apps/cli/src/bin.ts web` 与工作目录 `C:\Users\chenziyu\project\Agent\deepseek-harness\`。
+**托盘程序路径解析顺序**：设置项 `trayPath` → 环境变量 `DSH_TRAY_PATH` → `%LOCALAPPDATA%\dsh-tray\DshTray.exe`
+→ `%ProgramFiles%\dsh-tray\DshTray.exe` → 本仓库开发检出布局。
 
 ## 目录结构
 
 ```
 dsh-tray/
-├── src/DshTray/
-│   ├── DshTray.csproj      # net10.0-windows WinForms，单文件发布，内嵌图标
-│   ├── Program.cs          # 入口：托盘（重启/退出菜单）+ CLI 模式
-│   ├── ServerController.cs # 找进程/识别/杀树/重放启动/日志（与 UI 无关）
-│   ├── NativeMethods.cs    # CommandLineToArgvW / PEB 读工作目录
-│   └── assets/favicon.png  # 托盘图标（来自 dsh-launcher，MIT）
-├── scripts/build.ps1
+├── src/DshTray/           # 托盘程序（C# WinForms, net10.0-windows）
+│   ├── DshTray.csproj
+│   ├── Program.cs         # 托盘（重启/退出菜单）+ CLI 模式（--status/--restart/--stop）
+│   ├── ServerController.cs# 找进程/识别/杀树/重放启动
+│   ├── NativeMethods.cs   # CommandLineToArgvW / PEB 读工作目录
+│   └── assets/favicon.png
+├── plugin/                # Web 设置插件（官方 DSH SDK）
+│   ├── cordis.patch.yml
+│   └── src/
+│       ├── index.ts       # host：settings 命名空间 + /api/dsh-tray 路由
+│       ├── routes.ts      # 托盘定位 / 状态 / 动作（loopback 围栏）
+│       └── client/        # browser：设置卡片（状态 + 三按钮 + 配置表单）
+├── scripts/
+│   ├── build.ps1          # 构建托盘
+│   └── install.ps1        # 一键安装（构建托盘+插件 + 注册 profile）
 └── README.md
 ```
+
+## 卸载
+
+- 托盘：删除 `%LOCALAPPDATA%\dsh-tray\DshTray.exe`；
+- 插件：从 `~/.dsh/profiles/<profile>/package.json` 移除 `dsh-tray-plugin` 依赖与 bundles 条目，`pnpm install --dir ~/.dsh/profiles/<profile>`，重启 dsh；
+- 可选：删除 `~/.dsh/settings.yaml` 的 `dsh-tray:` 段。
+
+## 注意
+
+- 「重启 / 退出」会终止 dsh 服务进程本身；重启后服务按原命令自动拉起（约 10-30 秒），当初手动启动 dsh 的终端会显示命令已结束；
+- 托盘程序为框架依赖单文件，目标机需安装 .NET Desktop Runtime 10（`winget install Microsoft.DotNet.DesktopRuntime.10`）；
+- `/api/dsh-tray/*` 仅限回环请求（重启/退出会终止服务本身，禁止暴露到局域网）。
 
 ## 免责声明
 
@@ -113,4 +116,4 @@ dsh-tray/
 
 ## 许可证
 
-[MIT](LICENSE) © dsh-tray contributors
+[MIT](LICENSE)
