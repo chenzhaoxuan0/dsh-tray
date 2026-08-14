@@ -149,6 +149,8 @@ internal static class Program
         try
         {
             RestartProgress.Reset();
+            // 每次重启以 worker 横幅开头：明确是谁、何时、以何种方式在跑这个重启（排查进程树问题）。
+            RestartProgress.Info($"重启 worker 启动 (workerPid={Environment.ProcessId}, port={port})");
             RestartProgress.Stage(5, "检测当前服务…");
             var info = ServerController.Inspect(port);
             if (info.Pid > 0 && !info.IsDsh)
@@ -174,7 +176,7 @@ internal static class Program
             if (info.Pid > 0)
             {
                 RestartProgress.Stage(15, $"停止服务 (pid={info.Pid})…");
-                var freed = ServerController.KillAllDsh(port);
+                var freed = ServerController.KillAllDsh(port, 30000, RestartProgress.Info);
                 if (!freed)
                 {
                     var msg = "端口未能释放（已尝试杀端口占用者与残留 dsh 进程）";
@@ -197,7 +199,7 @@ internal static class Program
                 // 竞态兜底：再清扫一次并重试（第一次可能撞上抢先绑定端口的实例）
                 ServerController.Log(LogPath, "首次启动未就绪，清扫残留并重试一次…");
                 RestartProgress.Stage(52, "首次启动受阻，清理并重试…");
-                ServerController.KillAllDsh(port);
+                ServerController.KillAllDsh(port, 30000, RestartProgress.Info);
                 Thread.Sleep(800);
                 RestartProgress.Stage(58, "重新启动服务…");
                 started = ServerController.StartServer(info, port, AppDir, LogPath, RestartProgress.Info);

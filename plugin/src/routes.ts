@@ -9,7 +9,7 @@
  */
 
 import { spawn, execFile } from 'node:child_process'
-import { existsSync, readFileSync } from 'node:fs'
+import { appendFileSync, existsSync, readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { createConnection } from 'node:net'
@@ -113,11 +113,24 @@ export function resolveTrayExe(cfg: Pick<TrayConfig, 'trayPath'>): string | null
   return null
 }
 
-/** Spawn DshTray.exe detached and hidden; the tray / restart / exit keep running after this process dies. */
+/**
+ * Spawn DshTray.exe detached from the server's process tree.
+ *
+ * Critical: restart/exit kill the dsh server with `taskkill /F /T`, which walks
+ * the parent-child tree. If the worker were spawned directly here (inside the
+ * server's Node process), it would be a child of the server and get killed by
+ * its own cleanup — the restart would stop dead right after "停止服务…"
+ * (verified: plain spawn leaves the port down). Spawning via
+ * `cmd /c start "" "exe"` makes cmd exit immediately, orphaning the DshTray
+ * process so it no longer belongs to the server's tree and survives the kill
+ * to complete the restart (the tray icon survives too). Note: do NOT use
+ * `start /b` — it shares the console and hangs/behaves oddly for GUI apps.
+ */
 function spawnTray(exe: string, args: readonly string[]): { ok: true } | { ok: false; error: string } {
   try {
-    const child = spawn(exe, [...args], {
-      detached: true,
+    const argString = args.map((a) => (a.includes(' ') ? `"${a}"` : a)).join(' ')
+    const cmdLine = `start "" "${exe}" ${argString}`
+    const child = spawn('cmd.exe', ['/c', cmdLine], {
       stdio: 'ignore',
       windowsHide: true,
     })
@@ -125,6 +138,16 @@ function spawnTray(exe: string, args: readonly string[]): { ok: true } | { ok: f
     return { ok: true }
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message : String(error) }
+  }
+}
+
+/** 追加一行到 %USERPROFILE%\.dsh-tray.log（与托盘共用同一诊断日志，便于排查重启问题）。 */
+function logTrayLine(message: string): void {
+  try {
+    const logPath = join(homedir(), '.dsh-tray.log')
+    appendFileSync(logPath, `[${new Date().toLocaleTimeString('zh-CN', { hour12: false })}] [plugin] ${message}\n`)
+  } catch {
+    // 日志失败不阻断动作
   }
 }
 
@@ -290,8 +313,10 @@ export function makeRoutes(getConfig: () => TrayConfig): { routes: WebRoute[] } 
           : action === 'restart'
             ? ['--restart', '--port', String(cfg.port)]
             : ['--stop', '--port', String(cfg.port)]
+        logTrayLine(`动作 ${action}：spawn DshTray.exe ${args.join(' ')}（cmd start 脱离进程树）`)
         const result = spawnTray(exe, args)
         if (!result.ok) {
+          logTrayLine(`动作 ${action} 失败：${result.error}`)
           writeJson(res, 500, { error: result.error })
           return
         }

@@ -220,12 +220,18 @@ internal static class ServerController
     /// 父链包装（cmd/pnpm/launcher）在服务进程退出后自行退出，无需处理。
     /// 返回端口最终是否释放。
     /// </summary>
-    public static bool KillAllDsh(int port, int waitFreeMs = 30000)
+    public static bool KillAllDsh(int port, int waitFreeMs = 30000, Action<string>? onProgress = null)
     {
         var listener = FindPidOnPort(port);
+        onProgress?.Invoke(listener > 0
+            ? $"清理：端口 {port} 监听者 pid={listener}（taskkill /F /T）"
+            : $"清理：端口 {port} 当前无监听者");
         if (listener <= 0) return WaitPortFree(port, 1000);
         RunHidden("taskkill", $"/F /T /pid {listener}");
-        return WaitPortFree(port, waitFreeMs);
+        onProgress?.Invoke($"已对 pid={listener} 执行 taskkill /F /T");
+        var freed = WaitPortFree(port, waitFreeMs);
+        onProgress?.Invoke(freed ? $"端口 {port} 已释放" : $"端口 {port} 未能释放（等待 {waitFreeMs / 1000}s 后仍被占用）");
+        return freed;
     }
 
     /// <summary>等待端口释放；成功返回 true。</summary>
