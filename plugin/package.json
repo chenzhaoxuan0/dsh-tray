@@ -74,6 +74,6 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://example.invalid/dsh-tray-plugin"
+    "url": "https://github.com/chenzhaoxuan0/dsh-tray"
   }
 }
