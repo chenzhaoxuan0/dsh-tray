@@ -190,6 +190,20 @@ internal static class ServerController
         return WaitPortFree(port, waitFreeMs);
     }
 
+    /// <summary>
+    /// 结束目标端口的 dsh 服务：只杀端口占用者（/F /T，含其子进程树）。
+    /// 绝不枚举/清扫其它 dsh 进程——那会误杀别的端口上运行的服务（如 3080 被 3099 的重启误杀）。
+    /// 父链包装（cmd/pnpm/launcher）在服务进程退出后自行退出，无需处理。
+    /// 返回端口最终是否释放。
+    /// </summary>
+    public static bool KillAllDsh(int port, int waitFreeMs = 30000)
+    {
+        var listener = FindPidOnPort(port);
+        if (listener <= 0) return WaitPortFree(port, 1000);
+        RunHidden("taskkill", $"/F /T /pid {listener}");
+        return WaitPortFree(port, waitFreeMs);
+    }
+
     /// <summary>等待端口释放；成功返回 true。</summary>
     public static bool WaitPortFree(int port, int timeoutMs)
     {
@@ -215,92 +229,173 @@ internal static class ServerController
     }
 
     /// <summary>
-    /// 启动 dsh 服务：
-    /// 1) 若捕获到原进程命令行 + 工作目录 → 原样重放（最忠实于用户启动方式）；
-    /// 2) 否则执行应用目录下的 start-dsh.cmd（不存在时自动生成）。
-    /// 均以分离、无窗口方式启动，不依赖托盘进程存活。
+    /// 启动 dsh 服务（robust 版，绝不让托盘静默崩溃）。顺序：
+    /// 1) 内联启动：全路径 node + 被停服务的 cwd（最可靠，等同 restart-dsh-web.ps1）；
+    /// 2) 重放捕获到的命令行（裸可执行名先解析成全路径）；
+    /// 3) 应用目录 start-dsh.cmd 兜底（保留用户自定义）。
+    /// 每一步都记日志并捕获异常，输出重定向到 ~/.dsh-tray-server.log。
     /// </summary>
     public static bool StartServer(ServerInfo captured, int port, string appDir, string logPath)
     {
-        // 优先重放捕获到的命令行。工作目录缺失时不用重放——
-        // 相对路径脚本（如 apps/cli/src/bin.ts）在错误 cwd 下必然启动失败，此时走 start-dsh.cmd 更可预期。
+        var serverLog = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".dsh-tray-server.log");
+
+        // 1) 内联启动：全路径 node + 被停服务 cwd（最可靠）
+        if (!string.IsNullOrWhiteSpace(captured.WorkingDirectory))
+        {
+            var node = ResolveExecutable("node");
+            if (node is not null)
+            {
+                var cmdline = $"cd /d \"{captured.WorkingDirectory}\" && \"\"{node}\" --import tsx/esm apps/cli/src/bin.ts web >> \"{serverLog}\" 2>&1\"";
+                if (SpawnCmd(cmdline, captured.WorkingDirectory, port, logPath, "inline(cwd)"))
+                    return true;
+            }
+        }
+
+        // 2) 重放捕获到的命令行
         if (!string.IsNullOrWhiteSpace(captured.CommandLine)
             && !string.IsNullOrWhiteSpace(captured.WorkingDirectory))
         {
-            var argv = NativeMethods.ParseCommandLine(captured.CommandLine);
+            string[]? argv = null;
+            try { argv = NativeMethods.ParseCommandLine(captured.CommandLine); }
+            catch (Exception ex) { Log(logPath, $"重放命令行解析失败: {ex.Message}"); }
+
             if (argv is { Length: > 0 } && !string.IsNullOrWhiteSpace(argv[0]))
             {
-                try
+                var exe = ResolveExecutable(argv[0]);
+                if (exe is null)
                 {
-                    var psi = new ProcessStartInfo
-                    {
-                        FileName = argv[0],
-                        WorkingDirectory = captured.WorkingDirectory!,
-                        UseShellExecute = false,
-                        CreateNoWindow = true,
-                        WindowStyle = ProcessWindowStyle.Hidden,
-                    };
-                    if (argv.Length > 1)
-                    {
-                        foreach (var arg in argv.Skip(1))
-                            psi.ArgumentList.Add(arg);
-                    }
-
-                    var p = Process.Start(psi);
-                    if (p is not null)
-                    {
-                        Log(logPath, $"replay 启动成功: {captured.CommandLine}  (cwd={psi.WorkingDirectory}, pid={p.Id})");
-                        return WaitPortOpen(port, 60000);
-                    }
+                    Log(logPath, $"重放跳过：无法解析可执行文件 {argv[0]}，改用兜底启动");
                 }
-                catch (Exception ex)
+                else
                 {
-                    Log(logPath, $"replay 启动失败: {ex.Message}");
+                    var args = string.Join(' ', argv.Skip(1).Select(QuoteArg));
+                    var cmdline = $"\"\"{exe}\" {args} >> \"{serverLog}\" 2>&1\"";
+                    if (SpawnCmd(cmdline, captured.WorkingDirectory, port, logPath, $"replay({exe})"))
+                        return true;
                 }
             }
         }
 
-        // 回退：start-dsh.cmd
+        // 3) start-dsh.cmd 兜底（保留用户自定义）
         var cmd = Path.Combine(appDir, "start-dsh.cmd");
-        try
+        if (File.Exists(cmd))
         {
-            if (!File.Exists(cmd)) File.WriteAllText(cmd, GenerateDefaultStartCmd(port), Encoding.Default);
-            var psi2 = new ProcessStartInfo("cmd.exe", $"/c \"\"{cmd}\"\"")
-            {
-                WorkingDirectory = appDir,
-                UseShellExecute = false,
-                CreateNoWindow = true,
-                WindowStyle = ProcessWindowStyle.Hidden,
-            };
-            var p2 = Process.Start(psi2);
-            if (p2 is not null)
-            {
-                Log(logPath, $"start-dsh.cmd 启动成功: {cmd} (pid={p2.Id})");
-                return WaitPortOpen(port, 60000);
-            }
+            if (SpawnCmd($"\"\"{cmd}\"\"", appDir, port, logPath, "start-dsh.cmd"))
+                return true;
         }
-        catch (Exception ex)
+        else
         {
-            Log(logPath, $"start-dsh.cmd 启动失败: {ex.Message}");
+            Log(logPath, $"start-dsh.cmd 不存在: {cmd}");
         }
         return false;
     }
 
-    /// <summary>默认 start-dsh.cmd 内容（用户在应用目录可自行编辑覆盖）。</summary>
+    /// <summary>通过 cmd.exe 执行一条启动命令并等待端口监听；任何异常记日志并返回 false。
+    /// 子进程提前退出（如端口冲突 EADDRINUSE）时快速失败，不傻等 60s。</summary>
+    private static bool SpawnCmd(string commandLine, string cwd, int port, string logPath, string label)
+    {
+        try
+        {
+            var psi = new ProcessStartInfo("cmd.exe", $"/d /s /c {commandLine}")
+            {
+                WorkingDirectory = cwd,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                WindowStyle = ProcessWindowStyle.Hidden,
+            };
+            using var p = Process.Start(psi);
+            if (p is null)
+            {
+                Log(logPath, $"{label}: Process.Start 返回 null");
+                return false;
+            }
+            Log(logPath, $"{label}: 已启动 (cwd={cwd}, pid={p.Id})");
+            // 等待端口监听或进程提前退出（两者取先，上限 60s）
+            var deadline = Environment.TickCount64 + 60000;
+            while (Environment.TickCount64 < deadline)
+            {
+                if (PortOpen(port)) return true;
+                if (p.HasExited) break;
+                Thread.Sleep(300);
+            }
+            if (PortOpen(port)) return true;
+            if (p.HasExited)
+            {
+                Log(logPath, $"{label}: 进程提前退出 (exit={p.ExitCode})，可能端口冲突或启动失败（见 .dsh-tray-server.log）");
+            }
+            else
+            {
+                Log(logPath, $"{label}: 60s 内端口 {port} 未监听，启动可能失败");
+            }
+            return false;
+        }
+        catch (Exception ex)
+        {
+            Log(logPath, $"{label}: 启动异常: {ex.Message}");
+            return false;
+        }
+    }
+
+    /// <summary>给含空格/引号的参数加引号（cmd 层）。</summary>
+    private static string QuoteArg(string arg)
+    {
+        if (string.IsNullOrEmpty(arg)) return "\"\"";
+        if (arg.IndexOfAny(new[] { ' ', '\t', '"' }) < 0) return arg;
+        return "\"" + arg.Replace("\"", "\\\"") + "\"";
+    }
+
+    /// <summary>
+    /// 把裸可执行名解析为全路径（托盘进程的 PATH 可能不含 nodejs 目录）。
+    /// 已含路径则校验存在性；解析失败返回 null。
+    /// </summary>
+    public static string? ResolveExecutable(string exe)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(exe)) return null;
+            if (Path.IsPathRooted(exe)) return File.Exists(exe) ? exe : null;
+            if (string.Equals(exe, "node", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(exe, "node.exe", StringComparison.OrdinalIgnoreCase))
+            {
+                var pf = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
+                foreach (var cand in new[]
+                {
+                    Path.Combine(pf, "nodejs", "node.exe"),
+                    Path.Combine(pf + " (x86)", "nodejs", "node.exe"),
+                })
+                {
+                    if (File.Exists(cand)) return cand;
+                }
+            }
+            var userPath = Environment.GetEnvironmentVariable("PATH", EnvironmentVariableTarget.User);
+            foreach (var dir in (userPath ?? string.Empty).Split(';', StringSplitOptions.RemoveEmptyEntries))
+            {
+                var full = Path.Combine(dir.Trim(), exe);
+                if (File.Exists(full)) return full;
+            }
+        }
+        catch
+        {
+            // 忽略，返回 null 由调用方降级
+        }
+        return null;
+    }
+
+    /// <summary>默认 start-dsh.cmd 内容（用户在应用目录可自行编辑覆盖；仅作最后兜底）。</summary>
     public static string GenerateDefaultStartCmd(int port)
     {
+        var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        var harness = Path.Combine(home, "project", "Agent", "deepseek-harness");
+        var node = ResolveExecutable("node") ?? "node";
+        var log = Path.Combine(home, ".dsh-tray-server.log");
         return $"""
             @echo off
             rem dsh-tray 启动命令。修改本文件可控制 DeepSeek Harness 如何被（重新）启动。
-            rem 仅当"无法捕获正在运行的 dsh 进程命令行"时才会走到这里。
-            rem 默认：优先全局 dsh，其次 npx 拉取。
+            rem 仅当无法捕获被停服务的命令行/工作目录时才会走到这里（最后兜底）。
+            rem 默认：从本机 dev checkout 启动（全路径 node，输出进 .dsh-tray-server.log）。
             title DeepSeek Harness Server
-            where dsh >nul 2>&1
-            if not errorlevel 1 (
-              dsh web --host 127.0.0.1 --port {port}
-            ) else (
-              npx -y @deepseek-ai/dsh web --host 127.0.0.1 --port {port}
-            )
+            cd /d "{harness}"
+            "{node}" --import tsx/esm apps/cli/src/bin.ts web >> "{log}" 2>&1
             """;
     }
 

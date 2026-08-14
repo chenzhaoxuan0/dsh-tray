@@ -31,6 +31,13 @@ internal static class Program
     [STAThread]
     private static int Main(string[] args)
     {
+        // 全局异常兜底：任何未处理异常只记日志，托盘绝不在重启中途静默崩溃。
+        AppDomain.CurrentDomain.UnhandledException += (_, e) =>
+            ServerController.Log(LogPath, $"未处理异常（已兜底）: {e.ExceptionObject}");
+        Application.ThreadException += (_, e) =>
+            ServerController.Log(LogPath, $"UI 线程异常（已兜底）: {e.Exception}");
+        Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
+
         var cfg = LoadConfig();
 
         // ---- CLI 模式（无托盘）：便于测试与脚本化 ----
@@ -97,6 +104,14 @@ internal static class Program
             }
             case "--restart":
             {
+                // 重启互斥：同一时刻只允许一个重启 worker（托盘菜单与插件按钮共用）。
+                using var restartMutex = new Mutex(true, "Local\\DshTray.RestartWorker", out var firstWorker);
+                if (!firstWorker)
+                {
+                    RestartProgress.Fail("已有重启正在进行，本次请求已忽略");
+                    Console.WriteLine("another restart already in progress");
+                    return 2;
+                }
                 var ok = RestartOnce(port);
                 Console.WriteLine(ok ? "restart ok" : "restart failed (see log)");
                 return ok ? 0 : 1;
@@ -127,40 +142,76 @@ internal static class Program
         return null;
     }
 
-    /// <summary>执行一次重启：识别 → 捕获 → 杀树 → 等待端口释放 → 启动 → 等待就绪。</summary>
+    /// <summary>执行一次重启：识别 → 捕获 → 杀树 → 等待端口释放 → 启动 → 等待就绪。
+    /// 全程兜底 try/catch：任何异常都记日志并返回 false，绝不让托盘进程静默崩溃。</summary>
     private static bool RestartOnce(int port)
     {
-        var info = ServerController.Inspect(port);
-        if (info.Pid > 0 && !info.IsDsh)
+        try
         {
-            ServerController.Log(LogPath, $"重启中止：端口 {port} 被非 dsh 进程占用 (pid={info.Pid})");
-            return false;
-        }
-
-        ServerController.Log(LogPath, info.Pid > 0
-            ? $"开始重启：停止 pid={info.Pid} 后重新启动 (cmdline={info.CommandLine})"
-            : $"端口 {port} 无运行中的服务，直接启动");
-
-        if (info.Pid > 0)
-        {
-            var freed = ServerController.KillProcessTree(info.Pid, port);
-            if (!freed)
+            RestartProgress.Reset();
+            RestartProgress.Stage(5, "检测当前服务…");
+            var info = ServerController.Inspect(port);
+            if (info.Pid > 0 && !info.IsDsh)
             {
-                ServerController.Log(LogPath, "重启失败：端口未能释放");
+                var msg = $"端口 {port} 被非 dsh 进程占用 (pid={info.Pid})，拒绝重启";
+                ServerController.Log(LogPath, "重启中止：" + msg);
+                RestartProgress.Fail(msg);
                 return false;
             }
-        }
 
-        var started = ServerController.StartServer(info, port, AppDir, LogPath);
-        // 端口已监听还不够：确认 HTTP 真的响应（避免端口被无关程序占住时误报成功）
-        var ready = started && ServerController.ProbeHttp(port);
-        if (!ready)
+            ServerController.Log(LogPath, info.Pid > 0
+                ? $"开始重启：停止 pid={info.Pid} 后重新启动 (cmdline={info.CommandLine}, cwd={info.WorkingDirectory})"
+                : $"端口 {port} 无运行中的服务，直接启动");
+
+            if (info.Pid > 0)
+            {
+                RestartProgress.Stage(20, $"停止服务 (pid={info.Pid})…");
+                var freed = ServerController.KillAllDsh(port);
+                if (!freed)
+                {
+                    var msg = "端口未能释放（已尝试杀端口占用者与残留 dsh 进程）";
+                    ServerController.Log(LogPath, "重启失败：" + msg);
+                    RestartProgress.Fail(msg);
+                    return false;
+                }
+            }
+
+            RestartProgress.Stage(40, "清理残留进程…");
+            // 端口释放后稍作稳定，避免 TIME_WAIT / 竞态抢先绑定
+            Thread.Sleep(800);
+
+            RestartProgress.Stage(55, "启动服务…");
+            var started = ServerController.StartServer(info, port, AppDir, LogPath);
+            if (!started)
+            {
+                // 竞态兜底：再清扫一次并重试（第一次可能撞上抢先绑定端口的实例）
+                ServerController.Log(LogPath, "首次启动未就绪，清扫残留并重试一次…");
+                RestartProgress.Stage(62, "首次启动受阻，清理并重试…");
+                ServerController.KillAllDsh(port);
+                Thread.Sleep(800);
+                RestartProgress.Stage(72, "重新启动服务…");
+                started = ServerController.StartServer(info, port, AppDir, LogPath);
+            }
+            // 端口已监听还不够：确认 HTTP 真的响应（避免端口被无关程序占住时误报成功）
+            RestartProgress.Stage(85, "等待服务就绪…");
+            var ready = started && ServerController.ProbeHttp(port);
+            if (!ready)
+            {
+                var msg = "服务未能在 60s 内就绪（详见 .dsh-tray-server.log）";
+                ServerController.Log(LogPath, "重启失败：" + msg);
+                RestartProgress.Fail(msg + "\r\n" + RestartProgress.ServerLogTail(6));
+                return false;
+            }
+            ServerController.Log(LogPath, "重启成功");
+            RestartProgress.Ok("服务已重启");
+            return true;
+        }
+        catch (Exception ex)
         {
-            ServerController.Log(LogPath, "重启失败：服务未能在 60s 内就绪");
+            ServerController.Log(LogPath, $"重启异常（已捕获，托盘不会退出）: {ex}");
+            RestartProgress.Fail("异常: " + ex.Message);
             return false;
         }
-        ServerController.Log(LogPath, "重启成功");
-        return true;
     }
 
     private static TrayConfig LoadConfig()
@@ -290,17 +341,46 @@ internal static class Program
             _exitItem.Enabled = false;
             _tray.Text = $"DeepSeek Harness 重启中… (port {_cfg.Port})";
 
+            // 重启由独立 worker 进程执行（DshTray.exe --restart）：托盘崩溃也不中断重启；
+            // 进度窗口轮询 .dsh-tray-restart.log 实时显示阶段与失败详情。
+            var progress = new RestartProgressForm(_cfg.Port);
+            progress.Show();
+
+            try
+            {
+                var worker = Path.Combine(AppDir, "DshTray.exe");
+                var psi = new ProcessStartInfo(worker, $"--restart --port {_cfg.Port}")
+                {
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                    WindowStyle = ProcessWindowStyle.Hidden,
+                };
+                Process.Start(psi);
+            }
+            catch (Exception ex)
+            {
+                ServerController.Log(_log, $"启动重启 worker 失败: {ex.Message}");
+                RestartProgress.Fail("无法启动重启进程: " + ex.Message);
+            }
+
+            // 等 worker 落盘 [ok]/[fail] 后恢复菜单
             System.Threading.Tasks.Task.Run(() =>
             {
-                var ok = RestartOnce(_cfg.Port);
+                var deadline = DateTime.UtcNow.AddMinutes(6);
+                while (DateTime.UtcNow < deadline && !RestartProgress.IsFinished())
+                {
+                    Thread.Sleep(500);
+                }
                 BeginInvoke(() =>
                 {
+                    progress.Settle();
                     _busy = false;
                     _restartItem.Enabled = true;
                     _exitItem.Enabled = true;
                     _tray.Text = $"DeepSeek Harness (port {_cfg.Port})";
+                    var (_, _, _, ok, detail) = RestartProgress.Snapshot();
                     ShowBalloon("DeepSeek Harness",
-                        ok ? "服务已重启。" : "重启失败，详见 %USERPROFILE%\\.dsh-tray.log",
+                        ok ? "服务已重启。" : "重启失败：" + detail,
                         ok ? ToolTipIcon.Info : ToolTipIcon.Error);
                 });
             });
