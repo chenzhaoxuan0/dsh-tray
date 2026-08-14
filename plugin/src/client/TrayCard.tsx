@@ -253,6 +253,8 @@ export function TrayCard(props: TrayCardProps) {
   const [notice, setNotice] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [progress, setProgress] = useState<RestartProgressView | null>(null)
+  /** 重启完成结果横幅：成功绿 / 失败红，持久显示直到下次重启。 */
+  const [result, setResult] = useState<{ ok: boolean; text: string } | null>(null)
   const [trayPath, setTrayPath] = useState('')
   const [port, setPort] = useState('3080')
   const [saved, setSaved] = useState(false)
@@ -275,7 +277,8 @@ export function TrayCard(props: TrayCardProps) {
       if (Date.now() - startedAt > 4 * 60 * 1000) {
         stopPolling()
         // 超时未拿到 [ok]/[fail]：明确提示，而不是留下「重启中…」的残留
-        setNotice(t('action.restartTimeout'))
+        setResult({ ok: false, text: t('action.restartTimeout') })
+        setNotice(null)
         return
       }
       try {
@@ -283,7 +286,13 @@ export function TrayCard(props: TrayCardProps) {
         setProgress(view)
         if (view.done) {
           stopPolling()
-          setNotice(view.ok ? t('action.restartDone') : `${t('action.restartFailed')}: ${view.detail}`)
+          const elapsed = Math.max(1, Math.round((Date.now() - startedAt) / 1000))
+          const text = view.ok
+            ? `${t('action.restartDone')}（用时 ${elapsed} 秒）`
+            : `${t('action.restartFailed')}：${view.detail}`
+          // 醒目的完成结果横幅（成功绿 / 失败红），持久显示直到下次重启
+          setResult({ ok: view.ok, text })
+          setNotice(null)
           void refresh()
         }
       } catch {
@@ -326,6 +335,7 @@ export function TrayCard(props: TrayCardProps) {
     setBusy(action)
     setNotice(null)
     setError(null)
+    if (action === 'restart') setResult(null) // 新重启开始，清掉上次结果横幅
     const result = await props.run(action)
     setBusy(null)
     if (!result.ok) {
@@ -404,6 +414,30 @@ export function TrayCard(props: TrayCardProps) {
             {noExe ? <p style={{ ...descStyle, color: 'var(--dsw-alias-state-warn-primary)' }}>{t('action.noTrayExe')}</p> : null}
             {error !== null ? <p style={{ ...descStyle, color: 'var(--dsw-alias-state-error-primary)' }} role="status">{error}</p> : null}
             {notice !== null ? <p style={{ ...descStyle, color: 'var(--dsw-alias-state-success-primary)' }} role="status">{notice}</p> : null}
+
+            {/* ---- restart result banner（醒目、持久） ---- */}
+            {result !== null
+              ? (
+                <div
+                  role="status"
+                  style={{
+                    margin: '10px 0',
+                    padding: '12px 14px',
+                    borderRadius: '8px',
+                    border: `1px solid ${result.ok ? 'var(--dsw-alias-state-success-primary)' : 'var(--dsw-alias-state-error-primary)'}`,
+                    background: result.ok
+                      ? 'var(--dsw-alias-state-success-tertiary)'
+                      : 'var(--dsw-alias-state-error-secondary)',
+                    color: result.ok ? 'var(--dsw-alias-state-success-primary)' : 'var(--dsw-alias-state-error-primary)',
+                    fontSize: '13px',
+                    fontWeight: 600,
+                    lineHeight: 1.5,
+                  }}
+                >
+                  {result.ok ? '✓ ' : '✗ '}{result.text}
+                </div>
+              )
+              : null}
 
             {/* ---- restart progress ---- */}
             {progress !== null
