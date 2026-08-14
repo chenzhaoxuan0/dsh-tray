@@ -46,6 +46,7 @@ internal static class Program
         if (!firstInstance) return 0;
 
         ServerController.Log(LogPath, $"dsh-tray 启动 (pid={Environment.ProcessId}, port={cfg.Port}, appDir={AppDir})");
+        EnsureStartCmd(cfg.Port);
         Application.EnableVisualStyles();
         Application.SetCompatibleTextRenderingDefault(false);
 
@@ -176,6 +177,21 @@ internal static class Program
             ServerController.Log(LogPath, $"读取配置失败，使用默认值: {ex.Message}");
         }
         return new TrayConfig();
+    }
+
+    /// <summary>首次运行时在应用目录生成兜底启动脚本 start-dsh.cmd（已存在则跳过，用户可自行编辑）。</summary>
+    private static void EnsureStartCmd(int port)
+    {
+        try
+        {
+            var path = Path.Combine(AppDir, "start-dsh.cmd");
+            if (!File.Exists(path))
+                File.WriteAllText(path, ServerController.GenerateDefaultStartCmd(port), Encoding.Default);
+        }
+        catch
+        {
+            // 应用目录不可写（如 Program Files）时静默跳过
+        }
     }
 
     /// <summary>内嵌 favicon.png → Icon（与 dsh-launcher 相同做法）。</summary>
