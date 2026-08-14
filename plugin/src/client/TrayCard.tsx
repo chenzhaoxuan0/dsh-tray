@@ -274,6 +274,8 @@ export function TrayCard(props: TrayCardProps) {
     const tick = async (): Promise<void> => {
       if (Date.now() - startedAt > 4 * 60 * 1000) {
         stopPolling()
+        // 超时未拿到 [ok]/[fail]：明确提示，而不是留下「重启中…」的残留
+        setNotice(t('action.restartTimeout'))
         return
       }
       try {

@@ -305,6 +305,14 @@ internal static class Program
     /// <summary>托盘主循环（无主窗体）。</summary>
     private sealed class TrayAppContext : ApplicationContext
     {
+        /// <summary>
+        /// 外部命令文件（%USERPROFILE%\.dsh-tray-command.txt）：Web 插件在托盘运行时
+        /// 写入 restart/exit 委托托盘代为执行——托盘是独立进程，它拉起的重启 worker
+        /// 不依赖 dsh 服务器进程树，重启不会因杀死服务器而被连带中断。
+        /// </summary>
+        private static readonly string CommandFile = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".dsh-tray-command.txt");
+
         private readonly TrayConfig _cfg;
         private readonly string _log;
         private readonly NotifyIcon _tray;
@@ -319,6 +327,9 @@ internal static class Program
         /// 这个隐藏 Control 在 UI 线程创建，BeginInvoke 必定回到 UI 线程消息泵。
         /// </summary>
         private readonly Control _ui;
+
+        /// <summary>命令文件轮询计时器（UI 线程）。</summary>
+        private readonly System.Windows.Forms.Timer _commandTimer;
 
         public TrayAppContext(TrayConfig cfg, Icon? icon, string log, string appDir)
         {
@@ -345,6 +356,11 @@ internal static class Program
             _exitItem.Click += (_, _) => OnExit();
             _tray.DoubleClick += (_, _) => OpenWebUi(cfg.Port);
 
+            // 外部命令监视（Web 插件委托托盘执行重启/退出）
+            _commandTimer = new System.Windows.Forms.Timer { Interval = 400 };
+            _commandTimer.Tick += (_, _) => PollCommands();
+            _commandTimer.Start();
+
             // 启动时自检：服务是否在跑（气泡切回 UI 线程弹出）
             System.Threading.Tasks.Task.Run(() =>
             {
@@ -359,27 +375,58 @@ internal static class Program
             });
         }
 
-        private void OnRestart()
+        /// <summary>读取并消费命令文件：restart [port] / exit [port]。托盘在忙（重启进行中）时忽略新命令。</summary>
+        private void PollCommands()
+        {
+            string? command = null;
+            try
+            {
+                if (File.Exists(CommandFile))
+                {
+                    command = File.ReadAllText(CommandFile).Trim();
+                    File.Delete(CommandFile);
+                }
+            }
+            catch
+            {
+                return; // 读不到/删不掉（正被写）就下轮再试
+            }
+            if (string.IsNullOrEmpty(command)) return;
+            ServerController.Log(_log, "收到外部命令: " + command);
+
+            // 格式: "restart [port]" / "exit [port]" —— 端口缺省用托盘配置的端口
+            var parts = command.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+            var verb = parts.Length > 0 ? parts[0].ToLowerInvariant() : "";
+            int? port = null;
+            if (parts.Length > 1 && int.TryParse(parts[1], out var p) && p > 0 && p < 65536)
+                port = p;
+
+            if (verb == "restart") OnRestart(port);
+            else if (verb == "exit") OnExit(port);
+        }
+
+        private void OnRestart(int? portOverride = null)
         {
             if (_busy) return;
+            var port = portOverride ?? _cfg.Port;
             _busy = true;
             _restartItem.Enabled = false;
             _exitItem.Enabled = false;
-            _tray.Text = $"DeepSeek Harness 重启中… (port {_cfg.Port})";
+            _tray.Text = $"DeepSeek Harness 重启中… (port {port})";
 
             // 重启由独立 worker 进程执行（DshTray.exe --restart）：托盘崩溃也不中断重启；
             // 进度窗口轮询 .dsh-tray-restart.log 实时显示阶段与失败详情。
             // 先清掉上一次重启的 [ok]/[fail] 残留：否则进度窗首次轮询会读到旧标记，
             // 进度条瞬间跳到 100%「重启成功」而真正的重启才刚开始。
             RestartProgress.Reset();
-            var progress = new RestartProgressForm(_cfg.Port);
+            var progress = new RestartProgressForm(port);
             progress.Show();
 
             Process? worker = null;
             try
             {
                 var workerPath = Path.Combine(AppDir, "DshTray.exe");
-                var psi = new ProcessStartInfo(workerPath, $"--restart --port {_cfg.Port}")
+                var psi = new ProcessStartInfo(workerPath, $"--restart --port {port}")
                 {
                     UseShellExecute = false,
                     CreateNoWindow = true,
@@ -437,9 +484,10 @@ internal static class Program
             });
         }
 
-        private void OnExit()
+        private void OnExit(int? portOverride = null)
         {
             if (_busy) return;
+            var port = portOverride ?? _cfg.Port;
             _busy = true;
             _exitItem.Enabled = false;
 
@@ -447,11 +495,11 @@ internal static class Program
             {
                 if (_cfg.StopServerOnExit)
                 {
-                    var info = ServerController.Inspect(_cfg.Port);
+                    var info = ServerController.Inspect(port);
                     if (info.Pid > 0 && info.IsDsh)
                     {
                         ServerController.Log(_log, $"退出：停止 dsh 服务 (pid={info.Pid})");
-                        ServerController.KillProcessTree(info.Pid, _cfg.Port);
+                        ServerController.KillProcessTree(info.Pid, port);
                     }
                 }
                 BeginInvoke(() =>
@@ -495,6 +543,7 @@ internal static class Program
         {
             if (disposing)
             {
+                try { _commandTimer.Stop(); _commandTimer.Dispose(); } catch { }
                 try { _tray.Visible = false; _tray.Dispose(); } catch { }
             }
             base.Dispose(disposing);

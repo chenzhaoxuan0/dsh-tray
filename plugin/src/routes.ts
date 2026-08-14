@@ -9,7 +9,7 @@
  */
 
 import { spawn, execFile } from 'node:child_process'
-import { appendFileSync, existsSync, readFileSync } from 'node:fs'
+import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { createConnection } from 'node:net'
@@ -18,6 +18,9 @@ import type { WebRoute } from '@deepseek-ai/dsh-host-webserver'
 
 /** The /api/dsh-tray route family prefix. */
 export const TRAY_API = '/api/dsh-tray'
+
+/** 托盘命令文件（托盘每 400ms 轮询）：插件写 restart/exit 委托托盘代为执行。 */
+const TRAY_COMMAND_FILE = join(homedir(), '.dsh-tray-command.txt')
 
 /** Effective plugin config the routes read (resolved by the host apply). */
 export interface TrayConfig {
@@ -308,12 +311,37 @@ export function makeRoutes(getConfig: () => TrayConfig): { routes: WebRoute[] } 
           writeJson(res, 409, { error: '未找到 DshTray.exe：请在设置中填写 trayPath，或安装 dsh-tray' })
           return
         }
+        const exeName = exe.split(/[\\/]/).pop() ?? 'DshTray.exe'
+        const trayRunning = await imageRunning(exeName)
+
+        // 托盘在运行时：restart/exit 委托给托盘执行（托盘是独立进程，它拉起的 worker
+        // 不依赖本服务器进程树，杀死服务器时不会把 worker 一起带走——重启不会半路死掉）。
+        if ((action === 'restart' || action === 'exit') && trayRunning) {
+          const command = `${action === 'restart' ? 'restart' : 'exit'} ${cfg.port}`
+          logTrayLine(`动作 ${action}：托盘在运行，写命令文件委托托盘执行 "${command}"`)
+          try {
+            writeFileSync(TRAY_COMMAND_FILE, `${command}\n`, 'utf8')
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error)
+            logTrayLine(`动作 ${action} 委托失败：${message}`)
+            writeJson(res, 500, { error: `无法通知托盘：${message}` })
+            return
+          }
+          writeJson(res, 200, { ok: true, action, note: `delegated to tray (${command})` })
+          return
+        }
+
+        // 托盘未运行：直接 spawn（cmd start 孤儿化，脱离服务器树；见 spawnTray 注释）。
         const args = action === 'show'
           ? []
           : action === 'restart'
             ? ['--restart', '--port', String(cfg.port)]
             : ['--stop', '--port', String(cfg.port)]
-        logTrayLine(`动作 ${action}：spawn DshTray.exe ${args.join(' ')}（cmd start 脱离进程树）`)
+        logTrayLine(`动作 ${action}：${trayRunning ? '托盘在运行（show 无操作）' : '托盘未运行，直接 spawn DshTray.exe ' + args.join(' ') + '（cmd start 脱离进程树）'}`)
+        if (action === 'show' && trayRunning) {
+          writeJson(res, 200, { ok: true, action, note: 'tray already running' })
+          return
+        }
         const result = spawnTray(exe, args)
         if (!result.ok) {
           logTrayLine(`动作 ${action} 失败：${result.error}`)
