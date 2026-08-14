@@ -188,12 +188,18 @@ const buttonStyle: React.CSSProperties = {
   lineHeight: 1.5,
 }
 
-/** Danger-tinted action (restart / exit), themed via error tokens. */
+/**
+ * Danger-tinted action (restart / exit): solid error fill with the layer
+ * color as text — the design system's canonical danger treatment (same as
+ * AgentPresetSection.brokenBadge). Do NOT use `state-error-secondary` as the
+ * background here: in dark mode it resolves to the SAME color as
+ * `state-error-primary`, which would make the text invisible (red on red).
+ */
 const dangerButtonStyle: React.CSSProperties = {
   ...buttonStyle,
   borderColor: 'var(--dsw-alias-state-error-primary)',
-  background: 'var(--dsw-alias-state-error-secondary)',
-  color: 'var(--dsw-alias-state-error-primary)',
+  background: 'var(--dsw-alias-state-error-primary)',
+  color: 'var(--dsw-alias-bg-layer-3)',
 }
 
 /** Form field (themed input). */
