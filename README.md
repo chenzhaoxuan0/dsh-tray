@@ -5,6 +5,10 @@
 
 ![GitHub License](https://img.shields.io/badge/license-MIT-blue)
 
+## 预览
+
+![dsh-tray 设置插件截图（设置 -> 插件 -> dsh-tray 卡片）](pic.png)
+
 ## 这是什么
 
 一个仓库包含两个组件，功能相同、入口不同：
