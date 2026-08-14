@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Drawing;
 using System.Reflection;
 using System.Runtime.InteropServices;
+using System.Text;
 using System.Text.Json;
 
 namespace DshTray;
@@ -186,11 +187,18 @@ internal static class Program
         {
             var path = Path.Combine(AppDir, "start-dsh.cmd");
             if (!File.Exists(path))
+            {
                 File.WriteAllText(path, ServerController.GenerateDefaultStartCmd(port), Encoding.Default);
+                ServerController.Log(LogPath, $"已生成 start-dsh.cmd: {path}");
+            }
+            else
+            {
+                ServerController.Log(LogPath, $"start-dsh.cmd 已存在: {path}");
+            }
         }
-        catch
+        catch (Exception ex)
         {
-            // 应用目录不可写（如 Program Files）时静默跳过
+            ServerController.Log(LogPath, $"生成 start-dsh.cmd 失败: {ex.Message}");
         }
     }
 
