@@ -253,7 +253,7 @@ internal static class Program
         }
     }
 
-    /// <summary>内嵌 favicon.png → Icon（与 dsh-launcher 相同做法）。</summary>
+    /// <summary>内嵌 favicon.png → Icon（与 dsh-launcher 相同做法，但必须 clone）。</summary>
     private static Icon? LoadEmbeddedIcon()
     {
         try
@@ -264,7 +264,10 @@ internal static class Program
             using var stream = Assembly.GetExecutingAssembly().GetManifestResourceStream(name);
             if (stream is null) return null;
             using var bmp = new Bitmap(stream);
-            return Icon.FromHandle(bmp.GetHicon());
+            // GetHicon() 返回的 HICON 归 bitmap 所有：bitmap 一释放句柄即销毁。
+            // 必须先 clone 出独立副本再让 using 释放 bitmap，否则托盘持有一个
+            // 失效句柄，通知区域图标会偶发渲染成灰色/空白（GDI 内存被复用后）。
+            return (Icon)Icon.FromHandle(bmp.GetHicon()).Clone();
         }
         catch
         {
@@ -346,16 +349,17 @@ internal static class Program
             var progress = new RestartProgressForm(_cfg.Port);
             progress.Show();
 
+            Process? worker = null;
             try
             {
-                var worker = Path.Combine(AppDir, "DshTray.exe");
-                var psi = new ProcessStartInfo(worker, $"--restart --port {_cfg.Port}")
+                var workerPath = Path.Combine(AppDir, "DshTray.exe");
+                var psi = new ProcessStartInfo(workerPath, $"--restart --port {_cfg.Port}")
                 {
                     UseShellExecute = false,
                     CreateNoWindow = true,
                     WindowStyle = ProcessWindowStyle.Hidden,
                 };
-                Process.Start(psi);
+                worker = Process.Start(psi);
             }
             catch (Exception ex)
             {
@@ -363,13 +367,23 @@ internal static class Program
                 RestartProgress.Fail("无法启动重启进程: " + ex.Message);
             }
 
-            // 等 worker 落盘 [ok]/[fail] 后恢复菜单
+            // 等待 worker 结束：标记落盘（[ok]/[fail]）或进程退出（含异常退出）任一先到，
+            // 兜底 3 分钟。任何路径都必须恢复菜单，绝不无限置灰。
             System.Threading.Tasks.Task.Run(() =>
             {
-                var deadline = DateTime.UtcNow.AddMinutes(6);
-                while (DateTime.UtcNow < deadline && !RestartProgress.IsFinished())
+                var deadline = DateTime.UtcNow.AddMinutes(3);
+                while (DateTime.UtcNow < deadline)
                 {
-                    Thread.Sleep(500);
+                    if (RestartProgress.IsFinished()) break;
+                    if (worker is not null && worker.HasExited)
+                    {
+                        // 进程已退出但没写结果标记（被终止/异常崩溃）：补一个失败标记，
+                        // 让进度窗口与菜单都能正常收尾，而不是干等到超时。
+                        if (!RestartProgress.IsFinished())
+                            RestartProgress.Fail("重启进程已退出（未记录结果，可能被终止）");
+                        break;
+                    }
+                    Thread.Sleep(400);
                 }
                 BeginInvoke(() =>
                 {
