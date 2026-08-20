@@ -27,11 +27,11 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
   interface SlotMap {
     /**
      * The plugin configuration section's card seat, declared at runtime by
-     * the official settings-plugins package. Spelled here with the same
-     * shape so this package can register its card without depending on that
-     * sibling UI package.
+     * the official settings-plugins package. Keyed by the settings namespace
+     * the card edits; spelled here with the same shape so this package can
+     * register its card without depending on that sibling UI package.
      */
-    'settings.plugin.item': { kind: 'list'; scope: 'root'; owner: SettingsPluginItemOwnerProps }
+    'settings.plugin.item': { kind: 'keyed'; scope: 'root'; owner: SettingsPluginItemOwnerProps }
   }
 }
 
@@ -59,8 +59,7 @@ export function apply(ctx: ClientContext): void {
 
   ctx.slots.inject('settings.plugin.item', () => ctx.slots.register({
     name: 'settings.plugin.item',
-    id: 'dsh-tray',
-    order: 150,
+    key: TRAY_SETTINGS_NS,
     locale: TRAY_SETTINGS_NS,
     inject: (): TrayCardFace => controller.inject(),
   }, TrayCard))
